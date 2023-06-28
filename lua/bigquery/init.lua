@@ -149,187 +149,113 @@ local function flatten_row(json_row, schema)
 	return flattened
 end
 
+M.search_table = function()
+
+	vim.ui.input({ prompt = "Enter project, and keyword: " }, function(input)
+    input_list = vim.split(input, ',')
+    vim.pretty_print(input_list)
+		project = input_list[1]
+		keyword = input_list[2]
+	end)
+
+  project = string.gsub(project, "^%s*(.-)%s*$", "%1")
+  keyword = string.gsub(keyword, "^%s*(.-)%s*$", "%1")
+
+  local query = string.format([[
+    DECLARE schemas ARRAY<string>;
+    DECLARE query string;
+    DECLARE i INT64 DEFAULT 0;
+    DECLARE arrSize INT64;
+
+    SET schemas = ARRAY(select schema_name from \`%s.INFORMATION_SCHEMA.SCHEMATA\`);
+    SET query = \"\"\"
+    SELECT dataset, table_ID, row_count, size_bytes FROM (
+    \"\"\";
+    SET arrSize = ARRAY_LENGTH(schemas);
+
+    WHILE i < arrSize - 1 DO
+      SET query = CONCAT(query, \"SELECT '\", schemas[OFFSET(i)], \"' AS dataset, table_ID, row_count, size_bytes from %s.\", schemas[OFFSET(i)], '.__TABLES__ UNION ALL ');
+      SET i = i + 1;
+    END WHILE;
+
+    SET query = CONCAT(query, \"SELECT '\", schemas[ORDINAL(arrSize)], \"' AS dataset, table_ID, row_count, size_bytes from %s.\", schemas[ORDINAL(arrSize)], 
+    FORMAT(\"\"\"
+    .__TABLES__ )
+    WHERE table_ID LIKE '%%%%%%s%%%%'
+    \"\"\", '%s'));
+
+    EXECUTE IMMEDIATE query;
+  ]], project, project, project, keyword)
+
+  local cmd = string.format([[
+    bq query --nouse_legacy_sql "%s";
+  ]], query)
+
+  local floating_buf = open_floating()
+  vim.cmd "set nowrap"
+  vim.fn.jobstart( cmd,
+    {
+      on_stdout = function(j, std_data, e)
+        local output_line = {}
+        vim.api.nvim_buf_set_lines(0, -1, -1, false, std_data)
+      end,
+      on_stderr = function(j, std_data, e)
+        vim.pretty_print(string.gsub(std_data[1], "[\t\n\r]", ""))
+      end,
+      on_exit = function()
+        print("Finished")
+      end
+    }
+  )
+
+end
+
 M.show_schema = function(bq_full_table, sampling_ratio)
+
 	table_info = vim.split(bq_full_table, "%.")
 
 	local bq_project = table_info[1]
 	local bq_dataset = table_info[2]
 	local bq_table = table_info[3]
 
-	local url_info = "https://bigquery.googleapis.com/bigquery/v2/projects/"
-		.. bq_project
-		.. "/datasets/"
-		.. bq_dataset
-		.. "/tables/"
-		.. bq_table
+  local sampling_query = ''
+  if sampling_ratio ~= 100 then
+    sampling_query = string.format("TABLESAMPLE SYSTEM (%s PERCENT)", sampling_ratio)
+  end
 
-	local access_token
-	access_toeken_job = Job:new({
-		command = "gcloud",
-		args = { "auth", "application-default", "print-access-token" },
-		cwd = "/usr/bin",
-		on_exit = function(j, return_val)
-			access_token = j:result()[1]
-		end,
-	})
-	access_toeken_job:after(function()
-		curl.get(url_info, {
-			headers = {
-				Authorization = "Bearer " .. access_token,
-			},
-			callback = vim.schedule_wrap(function(out)
-				local floating_buf = open_floating()
-        local full_info_lines = {}
-				local bqtable = vim.json.decode(out.body)
-				local parsed_data = {
-					{ "numRows", bqtable.numRows },
-					{ "clustering", vim.json.encode(bqtable.clustering) },
-					{ "timePartitioning", vim.json.encode(bqtable.timePartitioning) },
-					{ "lastModifiedTime", timestamp_to_human(bqtable.lastModifiedTime) },
-					{ "creationTime", timestamp_to_human(bqtable.creationTime) },
-					{ "columns", parse_schema(bqtable.schema.fields, nil) },
-				}
+  cmd = string.format([[
 
-				local pretty_parsed_lines = {}
-				for _, v in ipairs(parsed_data) do
-					if type(v[2]) == "table" then
-						table.insert(pretty_parsed_lines, v[1] .. ": ")
-						for k2, v2 in ipairs(v[2]) do
-							table.insert(pretty_parsed_lines, "- " .. k2 .. ": " .. v2)
-						end
-					else
-						table.insert(pretty_parsed_lines, v[1] .. ": " .. v[2])
-					end
-				end
-				pretty_parsed_lines[#pretty_parsed_lines + 1] = ""
-				pretty_parsed_lines[#pretty_parsed_lines + 1] = "```sql"
+  export PROJECT_ID='%s';export SEARCH_TABLE='%s';
+  bq show --format pretty $PROJECT_ID:$SEARCH_TABLE;
+  bq query --format=prettyjson --nouse_legacy_sql " SELECT * FROM \`${PROJECT_ID}.${SEARCH_TABLE}\` %s LIMIT 10; ";
+
+  ]], bq_project, bq_dataset .. '.' .. bq_table, sampling_query)
+
+  local floating_buf = open_floating()
+  vim.cmd "set nowrap"
+
+  vim.fn.jobstart( cmd,
+    {
+      on_stdout = function(j, std_data, e)
+        local output_line = {}
+        vim.api.nvim_buf_set_lines(0, -1, -1, false, std_data)
+      end,
+      on_stderr = function(j, std_data, e)
+        vim.pretty_print(std_data[1])
+      end,
+      on_exit = function()
+        pretty_parsed_lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+        -- save as markdown file
+        local bqpath = Path:new(M.dir_bqtable)
+        local path_dataset = (bqpath / bq_project / bq_dataset)
+        pcall(path_dataset.mkdir, path_dataset, { parents = true })
+        vim.fn.writefile(pretty_parsed_lines, tostring(path_dataset / (bq_table .. "_FULL.md")), "b")
+        print("Finished")
+      end
+    }
+  )
 
 
-				if bqtable.timePartitioning ~= nil then
-					if bqtable.timePartitioning ~= nil then
-						required_filter = string.format(
-							"AND DATE(%s) = '%s'",
-							bqtable.timePartitioning.field,
-							os.date("%Y-%m-%d", os.time() - 60 * 60 * 24 * 2)
-						)
-					end
-				else
-					required_filter = ""
-				end
-
-				my_query = string.format(
-					[[
-          SELECT
-            *
-          FROM `%s.%s.%s` TABLESAMPLE SYSTEM (%s PERCENT)
-          WHERE 
-          1=1
-          %s
-          LIMIT 3
-        ]],
-					bq_project,
-					bq_dataset,
-					bq_table,
-					sampling_ratio,
-					required_filter
-				)
-        table.append(pretty_parsed_lines, vim.split(my_query, '\n'))
-				pretty_parsed_lines[#pretty_parsed_lines + 1] = "````"
-				pretty_parsed_lines[#pretty_parsed_lines + 1] = ""
-
-				vim.api.nvim_buf_set_lines(floating_buf, 0, -1, false, pretty_parsed_lines)
-        table.append(full_info_lines, pretty_parsed_lines)
-
-
-				local post_body = vim.json.encode({
-					query = my_query,
-					maxResults = 3,
-					useLegacySql = false,
-					formatOptions = {
-						useInt64Timestamp = false,
-					},
-				})
-
-				curl.post("https://bigquery.googleapis.com/bigquery/v2/projects/" .. bq_project .. "/queries", {
-					headers = {
-						Authorization = "Bearer " .. access_token,
-						["Content-Type"] = "application/json",
-						["Content-Length"] = post_body:len(),
-					},
-					body = post_body,
-					callback = vim.schedule_wrap(function(post_out)
-						local resp_body = vim.json.decode(post_out.body)
-						local flattened_rows = {}
-
-            if resp_body.rows == nil then
-              print("EMPTY ROWS!")
-              return
-            end
-
-						for idx, _ in ipairs(resp_body.rows) do
-							table.insert(flattened_rows, flatten_row(resp_body.rows[idx].f, resp_body.schema.fields))
-						end
-						local flattend_cols = parse_schema(resp_body.schema.fields, nil)
-
-						local dumped = {}
-
-						for col_idx, col in ipairs(flattend_cols) do
-							flattend_row = { name = col }
-							for row_idx, row in ipairs(flattened_rows) do
-								if type(row[col_idx]) == "table" then
-									-- flattend_row[col] = vim.json.encode(row[col_idx])
-									if #row[col_idx] > 2 then
-										encoded = vim.json.encode({ row[col_idx][1], row[col_idx][2] }) .. "..."
-									else
-										encoded = vim.json.encode(row[col_idx])
-									end
-									flattend_row[row_idx] = encoded
-								else
-									flattend_row[row_idx] = row[col_idx]
-								end
-							end
-							table.insert(dumped, flattend_row)
-						end
-
-						table_header = { "name" }
-						for idx = 1, #flattened_rows do
-							table.insert(table_header, idx)
-						end
-
-						bq_pretty_table = tostring(
-							tprint(dumped, { column = table_header, frame = tprint.FRAME_DOUBLE, widthDefault = 60 })
-						)
-						nlines = vim.api.nvim_buf_line_count(floating_buf)
-						vim.api.nvim_buf_set_lines(
-							floating_buf,
-							nlines + 3,
-							-1,
-							false,
-							vim.split(bq_pretty_table, "\n")
-						)
-
-						bq_pretty_table_full = tostring(
-							tprint(dumped, { column = table_header, frame = tprint.FRAME_DOUBLE})
-						)
-            table.append(full_info_lines, vim.split(bq_pretty_table_full, "\n"))
-
-
-          -- save as markdown file
-          local bqpath = Path:new(M.dir_bqtable)
-          local path_dataset = (bqpath / bq_project / bq_dataset)
-          pcall(path_dataset.mkdir, path_dataset, { parents = true })
-          local saving_lines = vim.api.nvim_buf_get_lines(floating_buf, 0, -1, false)
-
-
-          vim.fn.writefile(saving_lines, tostring(path_dataset / (bq_table .. ".md")), "b")
-          vim.fn.writefile(full_info_lines, tostring(path_dataset / (bq_table .. "_FULL.md")), "b")
-
-					end),
-				})
-			end),
-		})
-	end)
-	access_toeken_job:start()
 end
 
 
@@ -349,8 +275,6 @@ local function arg_build(arguments)
   -- mprint(arguments)
   if arguments.dataType == nil and arguments.typeKind == nil and arguments.type == nil then
     for _, v in ipairs(arguments) do
-      -- vim.pretty_print(arguments)
-      -- vim.pretty_print(arg_build(v))
       arg_text = table.append(arg_text, arg_build(v))
     end
   elseif arguments.dataType ~= nil then
@@ -376,98 +300,124 @@ local function arg_build(arguments)
 end
 
 M.edit_routines = function(bq_full_table)
+
+
 	table_info = vim.split(bq_full_table, "%.")
 
 	local bq_project = table_info[1]
 	local bq_dataset = table_info[2]
 	local bq_table = table_info[3]
 
-	local url_info = "https://bigquery.googleapis.com/bigquery/v2/projects/"
-		.. bq_project
-		.. "/datasets/"
-		.. bq_dataset
-		.. "/routines/"
-		.. bq_table
+  local handle = io.popen(string.format([[
 
-	local access_token
-	access_toeken_job = Job:new({
-		command = "gcloud",
-		args = { "auth", "application-default", "print-access-token" },
-		cwd = "/usr/bin",
-		on_exit = function(j, return_val)
-			access_token = j:result()[1]
-		end,
-	})
-	access_toeken_job:after(function()
-		curl.get(url_info, {
-			headers = {
-				Authorization = "Bearer " .. access_token,
-			},
-			callback = vim.schedule_wrap(function(out)
-				local floating_buf = open_floating()
-        local full_info_lines = {}
-				local bqtable = vim.json.decode(out.body)
-				local parsed_data = {
-					{ "lastModifiedTime", timestamp_to_human(bqtable.lastModifiedTime) },
-					{ "creationTime", timestamp_to_human(bqtable.creationTime) },
-					{ "language", string.lower(bqtable.language) },
-					{ "routineReference", vim.json.encode(bqtable.routineReference) },
-					{ "arguments", vim.json.encode(bqtable.arguments)},
-          { "returnType", vim.json.encode(bqtable.returnType)}
-				}
+  export PROJECT_ID='%s';export SEARCH_TABLE='%s';
+  bq show --routine=true --format pretty $PROJECT_ID:$SEARCH_TABLE;
+  ]], bq_project, bq_dataset .. '.' .. bq_table))
 
-				local pretty_parsed_lines = {}
-				for _, v in ipairs(parsed_data) do
-					if type(v[2]) == "table" then
-						table.insert(pretty_parsed_lines, v[1] .. ": ")
-						for k2, v2 in ipairs(v[2]) do
-							table.insert(pretty_parsed_lines, "- " .. k2 .. ": " .. v2)
-						end
-					else
-						table.insert(pretty_parsed_lines, v[1] .. ": " .. v[2])
-					end
-				end
-				pretty_parsed_lines[#pretty_parsed_lines + 1] = ""
-				pretty_parsed_lines[#pretty_parsed_lines + 1] = "```sql"
+  -- read the output of the command
+  local result = handle:read("*a")
+  local pretty_parsed_lines = vim.split(result, "\n")
+  local floating_buf = open_floating()
+  vim.api.nvim_buf_set_lines(floating_buf, 0, -1, false, pretty_parsed_lines)
+  vim.cmd "set nowrap"
 
-        local routine_type = nil
-        local language_text = ""
-        local returns_text = ""
-        if bqtable.language == "JAVASCRIPT" then
-          routine_type = "FUNCTION"
-          returns_text = "RETURNS " .. vim.fn.join(arg_build(bqtable.returnType), ', ')
-          language_text = [[LANGUAGE js AS R"""]]
-        else
-          routine_type = "PROCEDURE"
-        end
+-- 	local url_info = "https://bigquery.googleapis.com/bigquery/v2/projects/"
+-- 		.. bq_project
+-- 		.. "/datasets/"
+-- 		.. bq_dataset
+-- 		.. "/routines/"
+-- 		.. bq_table
+--
+-- 	local access_token
+-- 	access_toeken_job = Job:new({
+-- 		command = "gcloud",
+-- 		args = { "auth", "application-default", "print-access-token" },
+-- 		cwd = "/usr/bin",
+-- 		on_exit = function(j, return_val)
+-- 			access_token = j:result()[1]
+-- 		end,
+-- 	})
+-- 	access_toeken_job:after(function()
+-- 		curl.get(url_info, {
+-- 			headers = {
+-- 				Authorization = "Bearer " .. access_token,
+-- 			},
+-- 			callback = vim.schedule_wrap(function(out)
+-- 				local floating_buf = open_floating()
+--         local full_info_lines = {}
+-- 				local bqtable = vim.json.decode(out.body)
+-- 				local parsed_data = {
+-- 					{ "lastModifiedTime", timestamp_to_human(bqtable.lastModifiedTime) },
+-- 					{ "creationTime", timestamp_to_human(bqtable.creationTime) },
+-- 					{ "language", string.lower(bqtable.language) },
+-- 					{ "routineReference", vim.json.encode(bqtable.routineReference) },
+-- 					{ "arguments", vim.json.encode(bqtable.arguments)},
+--           { "returnType", vim.json.encode(bqtable.returnType)}
+-- 				}
+--
+-- 				local pretty_parsed_lines = {}
+-- 				for _, v in ipairs(parsed_data) do
+-- 					if type(v[2]) == "table" then
+-- 						table.insert(pretty_parsed_lines, v[1] .. ": ")
+-- 						for k2, v2 in ipairs(v[2]) do
+-- 							table.insert(pretty_parsed_lines, "- " .. k2 .. ": " .. v2)
+-- 						end
+-- 					else
+-- 						table.insert(pretty_parsed_lines, v[1] .. ": " .. v[2])
+-- 					end
+-- 				end
+-- 				pretty_parsed_lines[#pretty_parsed_lines + 1] = ""
+-- 				pretty_parsed_lines[#pretty_parsed_lines + 1] = "```sql"
+--
+--         local routine_type = nil
+--         local language_text = ""
+--         local returns_text = ""
+--         if bqtable.language == "JAVASCRIPT" then
+--           routine_type = "FUNCTION"
+--           returns_text = "RETURNS " .. vim.fn.join(arg_build(bqtable.returnType), ', ')
+--           language_text = [[LANGUAGE js AS R"""]]
+--         else
+--           routine_type = "PROCEDURE"
+--         end
+--
+--         local args_text = vim.fn.join(arg_build(bqtable.arguments), ', ')
+--
+-- 				pretty_parsed_lines[#pretty_parsed_lines + 1] = string.format("CREATE OR REPLACE %s `%s`(%s) %s %s", routine_type, bq_full_table, args_text, returns_text, language_text)
+--
+--
+--         table.append(pretty_parsed_lines, vim.split(bqtable.definitionBody, '\n'))
+--
+--         if bqtable.language == "JAVASCRIPT" then
+--           pretty_parsed_lines[#pretty_parsed_lines + 1] = [["""]]
+--         end
+--
+-- 				pretty_parsed_lines[#pretty_parsed_lines + 1] = "````"
+-- 				pretty_parsed_lines[#pretty_parsed_lines + 1] = ""
+--
+-- 				vim.api.nvim_buf_set_lines(floating_buf, 0, -1, false, pretty_parsed_lines)
+--         table.append(full_info_lines, pretty_parsed_lines)
+--
+--         local bqpath = Path:new(M.dir_bqtable)
+--         local path_dataset = (bqpath / bq_project / bq_dataset)
+--         pcall(path_dataset.mkdir, path_dataset, { parents = true })
+--         local saving_lines = vim.api.nvim_buf_get_lines(floating_buf, 0, -1, false)
+--
+--         vim.fn.writefile(saving_lines, tostring(path_dataset / (bq_table .. ".md")), "b")
+-- 			end),
+-- 		})
+-- 	end)
+-- 	access_toeken_job:start()
 
-        local args_text = vim.fn.join(arg_build(bqtable.arguments), ', ')
+end
 
-				pretty_parsed_lines[#pretty_parsed_lines + 1] = string.format("CREATE OR REPLACE %s `%s`(%s) %s %s", routine_type, bq_full_table, args_text, returns_text, language_text)
+M.columns_list = function()
 
 
-        table.append(pretty_parsed_lines, vim.split(bqtable.definitionBody, '\n'))
+  open_floating()
+  local bqcols_file_path = os.getenv("BQCOLS_FILE_PATH")
+  vim.cmd("e " .. bqcols_file_path)
+  vim.cmd "set nowrap"
 
-        if bqtable.language == "JAVASCRIPT" then
-          pretty_parsed_lines[#pretty_parsed_lines + 1] = [["""]]
-        end
-
-				pretty_parsed_lines[#pretty_parsed_lines + 1] = "````"
-				pretty_parsed_lines[#pretty_parsed_lines + 1] = ""
-
-				vim.api.nvim_buf_set_lines(floating_buf, 0, -1, false, pretty_parsed_lines)
-        table.append(full_info_lines, pretty_parsed_lines)
-
-        local bqpath = Path:new(M.dir_bqtable)
-        local path_dataset = (bqpath / bq_project / bq_dataset)
-        pcall(path_dataset.mkdir, path_dataset, { parents = true })
-        local saving_lines = vim.api.nvim_buf_get_lines(floating_buf, 0, -1, false)
-
-        vim.fn.writefile(saving_lines, tostring(path_dataset / (bq_table .. ".md")), "b")
-			end),
-		})
-	end)
-	access_toeken_job:start()
 end
 
 M.ask_schema = function()
@@ -719,6 +669,9 @@ local function show_job_body(job_body)
 end
 
 M.async_bqjob = function(projectId, query_string)
+
+
+
 	local resp_body = ""
 	local access_token = ""
 
@@ -831,7 +784,38 @@ end
 
 M.async_bqjob_current_buf = function()
 	local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
-	M.async_bqjob(M.opts.configs.default_project, table.concat(lines, "\n"))
+  local query_str = table.concat(lines, "\n")
+  -- replace ` into \`
+  query_str = string.gsub(query_str, "`", "\\`")
+  -- local default_project = M.opts.configs.default_project
+
+  local cmd = string.format([[
+
+  bq query --format=prettyjson --nouse_legacy_sql "%s";
+
+  ]], query_str)
+
+	-- M.async_bqjob(M.opts.configs.default_project, table.concat(lines, "\n"))
+
+  local floating_buf = open_floating()
+  vim.cmd "set nowrap"
+
+  vim.fn.jobstart( cmd,
+    {
+      on_stdout = function(j, std_data, e)
+        local output_line = {}
+        vim.api.nvim_buf_set_lines(0, -1, -1, false, std_data)
+      end,
+      on_stderr = function(j, std_data, e)
+        vim.pretty_print(std_data[1])
+      end,
+      on_exit = function()
+        print("Finished")
+      end
+    }
+  )
+
+
 end
 
 
@@ -839,19 +823,19 @@ M.setup = function(opts)
   M.opts = setmetatable(opts or {}, {__index = defaults})
   M.initialized = true
 
-  if not Path:new(M.opts.config_path):exists() then 
+  if not Path:new(M.opts.config_path):exists() then
     vim.notify('Bigquery is not initialized; please check the existance of config file.', 4)
     return
   end
 
   M.dir_bqtable = Path:new(os.getenv("HOME") .. "/.nvim/bqtable")
 
-  if not dir_bqtable:is_dir() then
+  if not M.dir_bqtable:is_dir() then
     M.dir_bqtable:mkdir()
   end
 
   -- read config_path which is json
-  M.opts.configs = vim.json.decode(vim.fn.readfile(M.opts.config_path))
+  M.opts.configs = vim.json.decode(table.concat(vim.fn.readfile(M.opts.config_path), "\n"))
 
   if M.opts.configs.default_project == nil then
     vim.notify('Default project should not be empty', 4)
