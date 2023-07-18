@@ -838,7 +838,7 @@ M.setup = function(opts)
   M.opts.configs = vim.json.decode(table.concat(vim.fn.readfile(M.opts.config_path), "\n"))
 
   if M.opts.configs.default_project == nil then
-    vim.notify('Default project should not be empty', 4)
+    -- vim.notify('Default project should not be empty', 4)
     return
   end
 
