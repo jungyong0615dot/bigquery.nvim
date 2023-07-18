@@ -414,7 +414,7 @@ M.columns_list = function()
 
 
   open_floating()
-  local bqcols_file_path = os.getenv("BQCOLS_FILE_PATH")
+  local bqcols_file_path = os.getenv("NVIM_BIGQUERY_TABDIR")
   vim.cmd("e " .. bqcols_file_path)
   vim.cmd "set nowrap"
 
