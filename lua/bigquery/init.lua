@@ -829,7 +829,7 @@ M.setup = function(opts)
   M.initialized = true
 
   if not Path:new(M.opts.config_path):exists() then
-    vim.notify('Bigquery is not initialized; please check the existance of config file.', 4)
+    -- vim.notify('Bigquery is not initialized; please check the existance of config file.', 4)
     return
   end
 
@@ -843,7 +843,7 @@ M.setup = function(opts)
   M.opts.configs = vim.json.decode(table.concat(vim.fn.readfile(M.opts.config_path), "\n"))
 
   if M.opts.configs.default_project == nil then
-    vim.notify('Default project should not be empty', 4)
+    -- vim.notify('Default project should not be empty', 4)
     return
   end
 
