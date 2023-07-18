@@ -787,6 +787,7 @@ M.async_bqjob_current_buf = function()
   local query_str = table.concat(lines, "\n")
   -- replace ` into \`
   query_str = string.gsub(query_str, "`", "\\`")
+  query_str = string.gsub(query_str, '"', '\\"')
   -- local default_project = M.opts.configs.default_project
 
   local cmd = string.format([[
@@ -799,6 +800,10 @@ M.async_bqjob_current_buf = function()
 
   local floating_buf = open_floating()
   vim.cmd "set nowrap"
+
+  vim.api.nvim_buf_set_lines(floating_buf, -1, -1, false, {"```sql"})
+  vim.api.nvim_buf_set_lines(floating_buf, -1, -1, false, lines)
+  vim.api.nvim_buf_set_lines(floating_buf, -1, -1, false, {"```"})
 
   vim.fn.jobstart( cmd,
     {
