@@ -824,7 +824,7 @@ M.setup = function(opts)
   M.initialized = true
 
   if not Path:new(M.opts.config_path):exists() then
-    vim.notify('Bigquery is not initialized; please check the existance of config file.', 4)
+    -- vim.notify('Bigquery is not initialized; please check the existance of config file.', 4)
     return
   end
 
